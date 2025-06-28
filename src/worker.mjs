@@ -165,48 +165,66 @@ async function handleCompletions (req, apiKey) {
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
+  
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
 
-  body = response.body;
-  if (response.ok) {
-    let id = "chatcmpl-" + generateId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
-    const shared = {};
-    if (req.stream) {
-      body = response.body
+  // ======================= 最终修复开始 =======================
+  // 我们不再直接转发 response.body，而是先处理它
+  
+  // 创建一个新的Headers对象，并移除任何可能引起问题的编码头
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.delete('content-encoding');
+  responseHeaders.delete('content-length');
+  
+  // 保持CORS头部
+  const finalHeaders = fixCors({ headers: responseHeaders }).headers;
+
+  // 对于流式响应，我们直接转发原始的、未被修改的body
+  // 因为流式传输通常不会被中间代理自动压缩
+  if (req.stream) {
+      const transformedStream = response.body
         .pipeThrough(new TextDecoderStream())
-        .pipeThrough(new TransformStream({
-          transform: parseStream,
-          flush: parseStreamFlush,
-          buffer: "",
-          shared,
-        }))
-        .pipeThrough(new TransformStream({
-          transform: toOpenAiStream,
-          flush: toOpenAiStreamFlush,
-          streamIncludeUsage: req.stream_options?.include_usage,
-          model, id, last: [],
-          shared,
-        }))
+        .pipeThrough(new TransformStream({ transform: parseStream, flush: parseStreamFlush, buffer: "", shared: {} }))
+        .pipeThrough(new TransformStream({ transform: toOpenAiStream, flush: toOpenAiAStreamFlush, streamIncludeUsage: req.stream_options?.include_usage, model, id: "chatcmpl-" + generateId(), last: [], shared: {} }))
         .pipeThrough(new TextEncoderStream());
-    } else {
-      body = await response.text();
-      try {
-        body = JSON.parse(body);
-        if (!body.candidates) {
-          throw new Error("Invalid completion object");
-        }
-      } catch (err) {
-        console.error("Error parsing response:", err);
-        return new Response(body, fixCors(response)); // output as is
-      }
-      body = processCompletionsResponse(body, model, id);
-    }
+
+      return new Response(transformedStream, {
+          headers: finalHeaders,
+          status: response.status,
+          statusText: response.statusText,
+      });
   }
-  return new Response(body, fixCors(response));
+
+  // 对于非流式响应，这是问题的关键
+  // 我们明确地将响应体读取为文本（这会自动处理解压）
+  let responseBodyText = await response.text();
+  let finalBody = responseBodyText;
+
+  if (response.ok) {
+      try {
+          let bodyJSON = JSON.parse(responseBodyText);
+          if (!bodyJSON.candidates) {
+              throw new Error("Invalid completion object");
+          }
+          finalBody = processCompletionsResponse(bodyJSON, model, "chatcmpl-" + generateId());
+      } catch (err) {
+          console.error("Error parsing or processing response:", err);
+          // 如果处理失败，返回原始文本，但使用我们清理过的头部
+          return new Response(responseBodyText, { headers: finalHeaders, status: 500 }); 
+      }
+  }
+
+  // 返回一个全新的Response，使用干净的文本和头部
+  return new Response(finalBody, {
+      headers: finalHeaders,
+      status: response.status,
+      statusText: response.statusText,
+  });
+  // ======================= 最终修复结束 =======================
 }
 
 const adjustProps = (schemaPart) => {
