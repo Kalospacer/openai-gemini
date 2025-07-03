@@ -3,3 +3,8 @@
 
 [functions]
         node_bundler = "esbuild"
+[redirects]
+        from = "/v1beta/*"
+        to = "/api/proxy"
+        status = 200
+        force = true
