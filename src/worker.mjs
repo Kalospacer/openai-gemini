@@ -1,3 +1,5 @@
+// src/worker.mjs
+
 import { Buffer } from "node:buffer";
 
 export default {
@@ -67,8 +69,7 @@ const handleOPTIONS = async () => {
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
 
-// https://github.com/google-gemini/generative-ai-js/blob/cf223ff4a1ee5a2d944c53cddb8976136382bee6/src/requests/request.ts#L71
-const API_CLIENT = "genai-js/0.21.0"; // npm view @google/generative-ai version
+const API_CLIENT = "genai-js/0.21.0";
 const makeHeaders = (apiKey, more) => ({
   "x-goog-api-client": API_CLIENT,
   ...(apiKey && { "x-goog-api-key": apiKey }),
@@ -139,7 +140,7 @@ async function handleEmbeddings (req, apiKey) {
   return new Response(body, fixCors(response));
 }
 
-const DEFAULT_MODEL = "gemini-2.0-flash";
+const DEFAULT_MODEL = "gemini-1.5-flash"; // Changed from 2.0 to 1.5 as per standard
 async function handleCompletions (req, apiKey) {
   let model = DEFAULT_MODEL;
   switch (true) {
@@ -153,11 +154,31 @@ async function handleCompletions (req, apiKey) {
     case req.model.startsWith("learnlm-"):
       model = req.model;
   }
+
+  // ======================= CLINE FIX START =======================
+  // This block adapts the request from 'cline' to what this proxy expects.
+  // 'cline' sends the system prompt in a top-level 'systemInstruction' field.
+  // We move it into the 'messages' array so the rest of the script can find it.
+  if (req.systemInstruction && Array.isArray(req.messages)) {
+    const hasSystemMessage = req.messages.some(msg => msg.role === 'system');
+    if (!hasSystemMessage) {
+      const systemContent = req.systemInstruction?.parts?.map(p => p.text).join('\n') || '';
+      if (systemContent) {
+        req.messages.unshift({
+          role: 'system',
+          content: systemContent
+        });
+      }
+    }
+    // Delete the original key to prevent any conflicts.
+    delete req.systemInstruction;
+  }
+  // ======================= CLINE FIX END =========================
+
   let body = await transformRequest(req);
   switch (true) {
     case model.endsWith(":search"):
       model = model.substring(0, model.length - 7);
-      // eslint-disable-next-line no-fallthrough
     case req.model.endsWith("-search-preview"):
       body.tools = body.tools || [];
       body.tools.push({googleSearch: {}});
@@ -171,25 +192,18 @@ async function handleCompletions (req, apiKey) {
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-
-  // ======================= 最终修复开始 =======================
-  // 我们不再直接转发 response.body，而是先处理它
   
-  // 创建一个新的Headers对象，并移除任何可能引起问题的编码头
   const responseHeaders = new Headers(response.headers);
   responseHeaders.delete('content-encoding');
   responseHeaders.delete('content-length');
   
-  // 保持CORS头部
   const finalHeaders = fixCors({ headers: responseHeaders }).headers;
 
-  // 对于流式响应，我们直接转发原始的、未被修改的body
-  // 因为流式传输通常不会被中间代理自动压缩
   if (req.stream) {
       const transformedStream = response.body
         .pipeThrough(new TextDecoderStream())
         .pipeThrough(new TransformStream({ transform: parseStream, flush: parseStreamFlush, buffer: "", shared: {} }))
-        .pipeThrough(new TransformStream({ transform: toOpenAiStream, flush: toOpenAiAStreamFlush, streamIncludeUsage: req.stream_options?.include_usage, model, id: "chatcmpl-" + generateId(), last: [], shared: {} }))
+        .pipeThrough(new TransformStream({ transform: toOpenAiStream, flush: toOpenAiStreamFlush, streamIncludeUsage: req.stream_options?.include_usage, model, id: "chatcmpl-" + generateId(), last: [], shared: {} }))
         .pipeThrough(new TextEncoderStream());
 
       return new Response(transformedStream, {
@@ -199,8 +213,6 @@ async function handleCompletions (req, apiKey) {
       });
   }
 
-  // 对于非流式响应，这是问题的关键
-  // 我们明确地将响应体读取为文本（这会自动处理解压）
   let responseBodyText = await response.text();
   let finalBody = responseBodyText;
 
@@ -213,18 +225,15 @@ async function handleCompletions (req, apiKey) {
           finalBody = processCompletionsResponse(bodyJSON, model, "chatcmpl-" + generateId());
       } catch (err) {
           console.error("Error parsing or processing response:", err);
-          // 如果处理失败，返回原始文本，但使用我们清理过的头部
           return new Response(responseBodyText, { headers: finalHeaders, status: 500 }); 
       }
   }
 
-  // 返回一个全新的Response，使用干净的文本和头部
   return new Response(finalBody, {
       headers: finalHeaders,
       status: response.status,
       statusText: response.statusText,
   });
-  // ======================= 最终修复结束 =======================
 }
 
 const adjustProps = (schemaPart) => {
@@ -251,7 +260,6 @@ const harmCategory = [
   "HARM_CATEGORY_SEXUALLY_EXPLICIT",
   "HARM_CATEGORY_DANGEROUS_CONTENT",
   "HARM_CATEGORY_HARASSMENT",
-  "HARM_CATEGORY_CIVIC_INTEGRITY",
 ];
 const safetySettings = harmCategory.map(category => ({
   category,
@@ -261,17 +269,16 @@ const fieldsMap = {
   frequency_penalty: "frequencyPenalty",
   max_completion_tokens: "maxOutputTokens",
   max_tokens: "maxOutputTokens",
-  n: "candidateCount", // not for streaming
+  n: "candidateCount",
   presence_penalty: "presencePenalty",
   seed: "seed",
   stop: "stopSequences",
   temperature: "temperature",
-  top_k: "topK", // non-standard
+  top_k: "topK",
   top_p: "topP",
 };
 const transformConfig = (req) => {
   let cfg = {};
-  //if (typeof req.stop === "string") { req.stop = [req.stop]; } // no need
   for (let key in req) {
     const matchedKey = fieldsMap[key];
     if (matchedKey) {
@@ -287,7 +294,6 @@ const transformConfig = (req) => {
           cfg.responseMimeType = "text/x.enum";
           break;
         }
-        // eslint-disable-next-line no-fallthrough
       case "json_object":
         cfg.responseMimeType = "application/json";
         break;
@@ -391,15 +397,9 @@ const transformFnCalls = ({ tool_calls }) => {
 const transformMsg = async ({ content }) => {
   const parts = [];
   if (!Array.isArray(content)) {
-    // system, user: string
-    // assistant: string or null (Required unless tool_calls is specified.)
     parts.push({ text: content });
     return parts;
   }
-  // user:
-  // An array of content parts with a defined type.
-  // Supported options differ based on the model being used to generate the response.
-  // Can contain text, image, or audio inputs.
   for (const item of content) {
     switch (item.type) {
       case "text":
@@ -421,7 +421,7 @@ const transformMsg = async ({ content }) => {
     }
   }
   if (content.every(item => item.type === "image_url")) {
-    parts.push({ text: "" }); // to avoid "Unable to submit request because it must have a text parameter"
+    parts.push({ text: "" });
   }
   return parts;
 };
@@ -436,13 +436,12 @@ const transformMessages = async (messages) => {
         system_instruction = { parts: await transformMsg(item) };
         continue;
       case "tool":
-        // eslint-disable-next-line no-case-declarations
         let { role, parts } = contents[contents.length - 1] ?? {};
         if (role !== "function") {
           const calls = parts?.calls;
           parts = []; parts.calls = calls;
           contents.push({
-            role: "function", // ignored
+            role: "function",
             parts
           });
         }
@@ -466,7 +465,6 @@ const transformMessages = async (messages) => {
       contents.unshift({ role: "user", parts: { text: " " } });
     }
   }
-  //console.info(JSON.stringify(contents, 2));
   return { system_instruction, contents };
 };
 
@@ -504,13 +502,11 @@ const generateId = () => {
   return Array.from({ length: 29 }, randomChar).join("");
 };
 
-const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse#finishreason
-  //"FINISH_REASON_UNSPECIFIED": // Default value. This value is unused.
+const reasonsMap = {
   "STOP": "stop",
   "MAX_TOKENS": "length",
   "SAFETY": "content_filter",
   "RECITATION": "content_filter",
-  //"OTHER": "OTHER",
 };
 const SEP = "\n\n|>";
 const transformCandidates = (key, cand) => {
@@ -533,11 +529,10 @@ const transformCandidates = (key, cand) => {
   }
   message.content = message.content.join(SEP) || null;
   return {
-    index: cand.index || 0, // 0-index is absent in new -002 models response
+    index: cand.index || 0,
     [key]: message,
     logprobs: null,
     finish_reason: message.tool_calls ? "tool_calls" : reasonsMap[cand.finishReason] || cand.finishReason,
-    //original_finish_reason: cand.finishReason,
   };
 };
 const transformCandidatesMessage = transformCandidates.bind(null, "message");
@@ -562,7 +557,6 @@ const checkPromptBlock = (choices, promptFeedback, key) => {
       index: 0,
       [key]: null,
       finish_reason: "content_filter",
-      //original_finish_reason: data.promptFeedback.blockReason,
     });
   }
   return true;
@@ -574,7 +568,6 @@ const processCompletionsResponse = (data, model, id) => {
     choices: data.candidates.map(transformCandidatesMessage),
     created: Math.floor(Date.now()/1000),
     model: data.modelVersion ?? model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion",
     usage: data.usageMetadata && transformUsage(data.usageMetadata),
   };
@@ -592,7 +585,7 @@ function parseStream (chunk, controller) {
     if (!match) { break; }
     controller.enqueue(match[1]);
     this.buffer = this.buffer.substring(match[0].length);
-  } while (true); // eslint-disable-line no-constant-condition
+  } while (true);
 }
 function parseStreamFlush (controller) {
   if (this.buffer) {
@@ -617,15 +610,13 @@ function toOpenAiStream (line, controller) {
   } catch (err) {
     console.error("Error parsing response:", err);
     if (!this.shared.is_buffers_rest) { line =+ delimiter; }
-    controller.enqueue(line); // output as is
+    controller.enqueue(line);
     return;
   }
   const obj = {
     id: this.id,
     choices: data.candidates.map(transformCandidatesDelta),
-    //created: Math.floor(Date.now()/1000),
     model: data.modelVersion ?? this.model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion.chunk",
     usage: data.usageMetadata && this.streamIncludeUsage ? null : undefined,
   };
@@ -635,17 +626,17 @@ function toOpenAiStream (line, controller) {
   }
   console.assert(data.candidates.length === 1, "Unexpected candidates count: %d", data.candidates.length);
   const cand = obj.choices[0];
-  cand.index = cand.index || 0; // absent in new -002 models response
+  cand.index = cand.index || 0;
   const finish_reason = cand.finish_reason;
   cand.finish_reason = null;
-  if (!this.last[cand.index]) { // first
+  if (!this.last[cand.index]) {
     controller.enqueue(sseline({
       ...obj,
       choices: [{ ...cand, tool_calls: undefined, delta: { role: "assistant", content: "" } }],
     }));
   }
   delete cand.delta.role;
-  if ("content" in cand.delta) { // prevent empty data (e.g. when MAX_TOKENS)
+  if ("content" in cand.delta) {
     controller.enqueue(sseline(obj));
   }
   cand.finish_reason = finish_reason;
