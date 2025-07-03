@@ -10,7 +10,7 @@ export default {
     
     const errHandler = (err) => {
       console.error("Error Handler Caught:", err);
-      const errorBody = { error: { message: `[PROXY] ${err.message}`, code: err.status ?? 500 } };
+      const errorBody = { error: { message: err.message, code: err.status ?? 500 } };
       return new Response(JSON.stringify(errorBody, null, 2), fixCors({ 
         status: err.status ?? 500, 
         headers: { 'Content-Type': 'application/json' } 
@@ -54,13 +54,9 @@ async function handleCompletions (req, apiKey) {
 
   let body = await transformRequest(req);
 
-  // ======================= 502 TIMEOUT FIX =======================
-  // We are now IGNORING `req.stream` from the client.
-  // We will ALWAYS request a streaming response from Google to prevent timeouts.
-  console.log("Forcing streaming response to prevent Netlify function timeout.");
-  const TASK = "streamGenerateContent";
-  let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}?alt=sse`;
-  // ===============================================================
+  const TASK = req.stream ? "streamGenerateContent" : "generateContent";
+  let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
+  if (req.stream) { url += "?alt=sse"; }
   
   const response = await fetch(url, {
     method: "POST",
@@ -68,8 +64,14 @@ async function handleCompletions (req, apiKey) {
     body: JSON.stringify(body),
   });
   
+  // ======================= FINAL ERROR HANDLING FIX =======================
+  // If the response from Google is NOT successful, this is the critical part.
   if (!response.ok) {
+    // Get the raw error text from Google's response.
     const googleErrorText = await response.text();
+    
+    // Create a new, simple error object.
+    // The main 'message' field will now contain the FULL, UNMODIFIED error from Google.
     const clientError = {
       error: {
         message: `[PROXY] Google API Error: ${googleErrorText}`,
@@ -77,27 +79,51 @@ async function handleCompletions (req, apiKey) {
         code: response.status,
       }
     };
+    
+    // Return this raw error directly to the user's screen.
     return new Response(JSON.stringify(clientError, null, 2), fixCors({
       status: response.status,
       headers: { 'Content-Type': 'application/json' }
     }));
   }
+  // ========================================================================
   
+  // If the request was successful, process and return the response as before.
   const finalHeaders = new Headers(response.headers);
   finalHeaders.delete('content-encoding');
   finalHeaders.delete('content-length');
-  // Crucially, set the content type to what the client now expects: a stream.
-  finalHeaders.set('Content-Type', 'text/event-stream');
+  
+  if (req.stream) {
+    const transformedStream = response.body
+        .pipeThrough(new TextDecoderStream())
+        .pipeThrough(new TransformStream({ transform: parseStream, flush: parseStreamFlush, buffer: "", shared: {} }))
+        .pipeThrough(new TransformStream({ transform: toOpenAiStream, flush: toOpenAiStreamFlush, streamIncludeUsage: req.stream_options?.include_usage, model, id: "chatcmpl-" + generateId(), last: [], shared: {} }))
+        .pipeThrough(new TextEncoderStream());
 
-  // The response from Google is already a stream. We just need to transform it
-  // into an OpenAI-compatible stream format and forward it.
-  const transformedStream = response.body
-      .pipeThrough(new TextDecoderStream())
-      .pipeThrough(new TransformStream({ transform: parseStream, flush: parseStreamFlush, buffer: "", shared: {} }))
-      .pipeThrough(new TransformStream({ transform: toOpenAiStream, flush: toOpenAiStreamFlush, streamIncludeUsage: req.stream_options?.include_usage, model, id: "chatcmpl-" + generateId(), last: [], shared: {} }))
-      .pipeThrough(new TextEncoderStream());
+      return new Response(transformedStream, {
+          headers: fixCors({headers: finalHeaders}).headers,
+          status: response.status,
+          statusText: response.statusText,
+      });
+  }
 
-  return new Response(transformedStream, {
+  let responseBodyText = await response.text();
+  let finalBody = responseBodyText;
+
+  if (response.ok) {
+      try {
+          let bodyJSON = JSON.parse(responseBodyText);
+          if (!bodyJSON.candidates) {
+              throw new Error("Invalid completion object");
+          }
+          finalBody = processCompletionsResponse(bodyJSON, model, "chatcmpl-" + generateId());
+      } catch (err) {
+          console.error("Error parsing or processing response:", err);
+          return new Response(responseBodyText, { headers: fixCors({headers: finalHeaders}).headers, status: 500 }); 
+      }
+  }
+
+  return new Response(finalBody, {
       headers: fixCors({headers: finalHeaders}).headers,
       status: response.status,
       statusText: response.statusText,
@@ -105,6 +131,7 @@ async function handleCompletions (req, apiKey) {
 }
 
 // ... The rest of the file can remain exactly the same ...
+// It is provided here for completeness.
 
 class HttpError extends Error {
   constructor(message, status) {
