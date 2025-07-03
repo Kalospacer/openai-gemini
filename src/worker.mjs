@@ -9,38 +9,47 @@ export default {
     }
     const errHandler = (err) => {
       console.error(err);
-      return new Response(err.message, fixCors({ status: err.status ?? 500 }));
+      return new Response(JSON.stringify({ error: { message: err.message, code: err.status ?? 500 } }), fixCors({ status: err.status ?? 500, headers: { 'Content-Type': 'application/json' } }));
     };
     try {
       const auth = request.headers.get("Authorization");
       const apiKey = auth?.split(" ")[1];
       const assert = (success) => {
         if (!success) {
-          throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
+          throw new HttpError("The specified HTTP method is not allowed for the requested resource", 405);
         }
       };
+      
       const { pathname } = new URL(request.url);
-      switch (true) {
-        case pathname.endsWith("/chat/completions"):
-          assert(request.method === "POST");
-          return handleCompletions(await request.json(), apiKey)
-            .catch(errHandler);
-        case pathname.endsWith("/embeddings"):
-          assert(request.method === "POST");
-          return handleEmbeddings(await request.json(), apiKey)
-            .catch(errHandler);
-        case pathname.endsWith("/models"):
-          assert(request.method === "GET");
-          return handleModels(apiKey)
-            .catch(errHandler);
-        default:
-          throw new HttpError("404 Not Found", 404);
+      
+      // ======================= ROUTING FIX START =======================
+      // We check for the specific path, including the /v1 prefix.
+      if (pathname.endsWith("/v1/chat/completions")) {
+        assert(request.method === "POST");
+        return handleCompletions(await request.json(), apiKey).catch(errHandler);
       }
+      if (pathname.endsWith("/v1/embeddings")) {
+        assert(request.method === "POST");
+        return handleEmbeddings(await request.json(), apiKey).catch(errHandler);
+      }
+      if (pathname.endsWith("/v1/models")) {
+        assert(request.method === "GET");
+        return handleModels(apiKey).catch(errHandler);
+      }
+      // ======================= ROUTING FIX END =========================
+
+      // If no route matches, throw a 404.
+      throw new HttpError("404 Not Found", 404);
+
     } catch (err) {
       return errHandler(err);
     }
   }
 };
+
+
+// ... (The rest of the file remains exactly the same)
+
 
 class HttpError extends Error {
   constructor(message, status) {
@@ -140,7 +149,7 @@ async function handleEmbeddings (req, apiKey) {
   return new Response(body, fixCors(response));
 }
 
-const DEFAULT_MODEL = "gemini-1.5-flash"; // Changed from 2.0 to 1.5 as per standard
+const DEFAULT_MODEL = "gemini-1.5-flash";
 async function handleCompletions (req, apiKey) {
   let model = DEFAULT_MODEL;
   switch (true) {
@@ -155,10 +164,6 @@ async function handleCompletions (req, apiKey) {
       model = req.model;
   }
 
-  // ======================= CLINE FIX START =======================
-  // This block adapts the request from 'cline' to what this proxy expects.
-  // 'cline' sends the system prompt in a top-level 'systemInstruction' field.
-  // We move it into the 'messages' array so the rest of the script can find it.
   if (req.systemInstruction && Array.isArray(req.messages)) {
     const hasSystemMessage = req.messages.some(msg => msg.role === 'system');
     if (!hasSystemMessage) {
@@ -170,10 +175,8 @@ async function handleCompletions (req, apiKey) {
         });
       }
     }
-    // Delete the original key to prevent any conflicts.
     delete req.systemInstruction;
   }
-  // ======================= CLINE FIX END =========================
 
   let body = await transformRequest(req);
   switch (true) {
