@@ -1,15 +1,15 @@
+# netlify.toml
+
 # 构建设置
 [build]
   publish = "public/"
 
-# 告诉 Netlify 函数代码在哪个目录下
+# 告诉Netlify，您的云函数位于 "api/" 目录
 [functions]
   directory = "api/"
-  node_bundler = "esbuild"
 
-# 边缘函数配置
-[[edge_functions]]
-  # 将所有路径的请求都交由名为 "handler" 的边缘函数处理
-  path = "/*"
-  # "handler" 必须与您在 /netlify/edge-functions/ 目录下的文件名（handler.mjs）一致
-  function = "handler"
+# 路由规则：将所有对 /v1/* 的请求都转发给名为 'handler' 的函数处理
+[[redirects]]
+  from = "/v1/*"
+  to = "/.netlify/functions/handler"
+  status = 200
