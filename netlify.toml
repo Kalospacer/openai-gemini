@@ -7,11 +7,7 @@
   directory = "api/"
   node_bundler = "esbuild"
 
-# 重定向规则
 [[redirects]]
-  # 捕获所有来自 Cline 的 Gemini API 请求
-  from = "/v1beta/*"
-  # 将请求转发给正确的函数地址 (由文件名 proxy.js 决定)
-  to = "/.netlify/functions/proxy"
+  from = "/*"
+  to = "/.netlify/functions/gemini"
   status = 200
-  force = true
