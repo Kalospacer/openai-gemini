@@ -2,12 +2,16 @@
 [build]
   publish = "public/"
 
-# 函数设置
+# 告诉 Netlify 函数代码在哪个目录下
 [functions]
+  directory = "api/"
   node_bundler = "esbuild"
 
+# 重定向规则
 [[redirects]]
+  # 捕获所有来自 Cline 的 Gemini API 请求
   from = "/v1beta/*"
-  to = "/.netlify/functions/handler"  # <--- 修改这一行
+  # 将请求转发给正确的函数地址 (由文件名 proxy.js 决定)
+  to = "/.netlify/functions/proxy"
   status = 200
   force = true
