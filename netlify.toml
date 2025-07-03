@@ -7,7 +7,9 @@
   directory = "api/"
   node_bundler = "esbuild"
 
-[[redirects]]
-  from = "/*"
-  to = "/.netlify/functions/gemini"
-  status = 200
+# 边缘函数配置
+[[edge_functions]]
+  # 将所有路径的请求都交由名为 "handler" 的边缘函数处理
+  path = "/*"
+  # "handler" 必须与您在 /netlify/edge-functions/ 目录下的文件名（handler.mjs）一致
+  function = "handler"
