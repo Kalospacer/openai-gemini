@@ -8,26 +8,10 @@ export default {
       return handleOPTIONS();
     }
     const errHandler = (err) => {
-      console.error("Error Handler Caught:", err); // Keep for server-side
+      console.error(err);
       return new Response(JSON.stringify({ error: { message: err.message, code: err.status ?? 500 } }), fixCors({ status: err.status ?? 500, headers: { 'Content-Type': 'application/json' } }));
     };
     try {
-      const url = new URL(request.url);
-      
-      // ====================== DEBUGGING PAYLOAD START ======================
-      // Collect all debug info into an object.
-      const debugInfo = {
-        message: "DEBUGGING: No API route was matched. Please check the 'pathname' below against the routing logic in the code.",
-        url: request.url,
-        pathname: url.pathname,
-        method: request.method,
-        headers: {}
-      };
-      for(const [key, value] of request.headers.entries()) {
-        debugInfo.headers[key] = value;
-      }
-      // ======================= DEBUGGING PAYLOAD END =======================
-
       const auth = request.headers.get("Authorization");
       const apiKey = auth?.split(" ")[1];
       const assert = (success) => {
@@ -36,26 +20,25 @@ export default {
         }
       };
       
-      const { pathname } = url;
+      const { pathname } = new URL(request.url);
       
-      if (pathname.endsWith("/v1/chat/completions")) {
+      // Note: The routing now correctly expects paths like /v1/chat/completions
+      // because of the Netlify redirect rule `from = "/v1/*"`.
+      // The `pathname` variable here will be the path *after* the domain.
+      if (pathname.endsWith("/chat/completions")) {
         assert(request.method === "POST");
         return handleCompletions(await request.json(), apiKey).catch(errHandler);
       }
-      if (pathname.endsWith("/v1/embeddings")) {
+      if (pathname.endsWith("/embeddings")) {
         assert(request.method === "POST");
         return handleEmbeddings(await request.json(), apiKey).catch(errHandler);
       }
-      if (pathname.endsWith("/v1/models")) {
+      if (pathname.endsWith("/models")) {
         assert(request.method === "GET");
         return handleModels(apiKey).catch(errHandler);
       }
       
-      // If no route matches, return the detailed debug information as the response.
-      return new Response(JSON.stringify({ error: debugInfo }, null, 2), fixCors({
-          status: 404,
-          headers: { 'Content-Type': 'application/json' }
-      }));
+      throw new HttpError("404 Not Found: The requested endpoint does not exist on this proxy.", 404);
 
     } catch (err) {
       return errHandler(err);
@@ -180,6 +163,7 @@ async function handleCompletions (req, apiKey) {
       model = req.model;
   }
 
+  // This logic correctly handles the system prompt from cline
   if (req.systemInstruction && Array.isArray(req.messages)) {
     const hasSystemMessage = req.messages.some(msg => msg.role === 'system');
     if (!hasSystemMessage) {
