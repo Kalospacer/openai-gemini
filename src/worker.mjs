@@ -8,10 +8,26 @@ export default {
       return handleOPTIONS();
     }
     const errHandler = (err) => {
-      console.error(err);
+      console.error("Error Handler Caught:", err); // Keep for server-side
       return new Response(JSON.stringify({ error: { message: err.message, code: err.status ?? 500 } }), fixCors({ status: err.status ?? 500, headers: { 'Content-Type': 'application/json' } }));
     };
     try {
+      const url = new URL(request.url);
+      
+      // ====================== DEBUGGING PAYLOAD START ======================
+      // Collect all debug info into an object.
+      const debugInfo = {
+        message: "DEBUGGING: No API route was matched. Please check the 'pathname' below against the routing logic in the code.",
+        url: request.url,
+        pathname: url.pathname,
+        method: request.method,
+        headers: {}
+      };
+      for(const [key, value] of request.headers.entries()) {
+        debugInfo.headers[key] = value;
+      }
+      // ======================= DEBUGGING PAYLOAD END =======================
+
       const auth = request.headers.get("Authorization");
       const apiKey = auth?.split(" ")[1];
       const assert = (success) => {
@@ -20,10 +36,8 @@ export default {
         }
       };
       
-      const { pathname } = new URL(request.url);
+      const { pathname } = url;
       
-      // ======================= ROUTING FIX START =======================
-      // We check for the specific path, including the /v1 prefix.
       if (pathname.endsWith("/v1/chat/completions")) {
         assert(request.method === "POST");
         return handleCompletions(await request.json(), apiKey).catch(errHandler);
@@ -36,10 +50,12 @@ export default {
         assert(request.method === "GET");
         return handleModels(apiKey).catch(errHandler);
       }
-      // ======================= ROUTING FIX END =========================
-
-      // If no route matches, throw a 404.
-      throw new HttpError("404 Not Found", 404);
+      
+      // If no route matches, return the detailed debug information as the response.
+      return new Response(JSON.stringify({ error: debugInfo }, null, 2), fixCors({
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+      }));
 
     } catch (err) {
       return errHandler(err);
@@ -48,7 +64,7 @@ export default {
 };
 
 
-// ... (The rest of the file remains exactly the same)
+// ... [文件的其余部分保持不变] ...
 
 
 class HttpError extends Error {
