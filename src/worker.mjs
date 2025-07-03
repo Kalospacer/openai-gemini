@@ -2,19 +2,16 @@
 
 import { Buffer } from "node:buffer";
 
-// This is the main entry point for all requests.
 export default {
   async fetch (request) {
-    // Handle CORS preflight requests.
     if (request.method === "OPTIONS") {
       return handleOPTIONS();
     }
     
-    // Generic error handler to format responses.
     const errHandler = (err) => {
       console.error("Error Handler Caught:", err);
       const errorBody = { error: { message: err.message, code: err.status ?? 500 } };
-      return new Response(JSON.stringify(errorBody), fixCors({ 
+      return new Response(JSON.stringify(errorBody, null, 2), fixCors({ 
         status: err.status ?? 500, 
         headers: { 'Content-Type': 'application/json' } 
       }));
@@ -31,7 +28,6 @@ export default {
       
       const { pathname } = new URL(request.url);
       
-      // Route requests based on the path.
       if (pathname.endsWith("/chat/completions")) {
         assert(request.method === "POST", "Only POST method is allowed for chat completions.", 405);
         return handleCompletions(await request.json(), apiKey).catch(errHandler);
@@ -45,7 +41,6 @@ export default {
         return handleModels(apiKey).catch(errHandler);
       }
       
-      // If no route matches, throw a 404.
       throw new HttpError("404 Not Found: The requested endpoint does not exist on this proxy.", 404);
 
     } catch (err) {
@@ -54,54 +49,44 @@ export default {
   }
 };
 
-// ... [The rest of the file is mostly unchanged, but includes the critical error handling fix] ...
-
-// Main function to handle the chat completions logic.
 async function handleCompletions (req, apiKey) {
-  let model = req.model || "gemini-1.5-flash"; // Use provided model or a default.
+  const model = req.model || "gemini-1.5-flash";
 
-  // This logic correctly handles the system prompt from cline
-  if (req.systemInstruction && Array.isArray(req.messages)) {
-    // ... (system instruction logic as before)
-  }
-
-  // Transform the OpenAI-style request to a Gemini-style request.
   let body = await transformRequest(req);
 
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
   
-  // Make the upstream request to the Google Gemini API.
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   
-  // ======================= CRITICAL ERROR HANDLING FIX =======================
-  // If the response from Google is NOT successful, capture the detailed error.
+  // ======================= FINAL ERROR HANDLING FIX =======================
+  // If the response from Google is NOT successful, this is the critical part.
   if (!response.ok) {
-    const errorBodyText = await response.text();
-    console.error(`Upstream API Error (HTTP ${response.status}):`, errorBodyText);
+    // Get the raw error text from Google's response.
+    const googleErrorText = await response.text();
     
-    // Create a detailed error message to send back to the client (cline).
+    // Create a new, simple error object.
+    // The main 'message' field will now contain the FULL, UNMODIFIED error from Google.
     const clientError = {
       error: {
-        message: `Upstream API Error from Google (HTTP ${response.status}). See details below.`,
+        message: `[PROXY] Google API Error: ${googleErrorText}`,
         type: "upstream_api_error",
         code: response.status,
-        upstream_error: tryParseJSON(errorBodyText) // Embed the original error from Google.
       }
     };
     
-    // Return this detailed error to the user.
+    // Return this raw error directly to the user's screen.
     return new Response(JSON.stringify(clientError, null, 2), fixCors({
-      status: response.status, // Use the original error status from Google.
+      status: response.status,
       headers: { 'Content-Type': 'application/json' }
     }));
   }
-  // ===========================================================================
+  // ========================================================================
   
   // If the request was successful, process and return the response as before.
   const finalHeaders = new Headers(response.headers);
@@ -109,31 +94,44 @@ async function handleCompletions (req, apiKey) {
   finalHeaders.delete('content-length');
   
   if (req.stream) {
-    // ... (streaming logic as before) ...
+    const transformedStream = response.body
+        .pipeThrough(new TextDecoderStream())
+        .pipeThrough(new TransformStream({ transform: parseStream, flush: parseStreamFlush, buffer: "", shared: {} }))
+        .pipeThrough(new TransformStream({ transform: toOpenAiStream, flush: toOpenAiStreamFlush, streamIncludeUsage: req.stream_options?.include_usage, model, id: "chatcmpl-" + generateId(), last: [], shared: {} }))
+        .pipeThrough(new TextEncoderStream());
+
+      return new Response(transformedStream, {
+          headers: fixCors({headers: finalHeaders}).headers,
+          status: response.status,
+          statusText: response.statusText,
+      });
   }
 
   let responseBodyText = await response.text();
+  let finalBody = responseBodyText;
+
   if (response.ok) {
-      // ... (non-streaming success logic as before) ...
+      try {
+          let bodyJSON = JSON.parse(responseBodyText);
+          if (!bodyJSON.candidates) {
+              throw new Error("Invalid completion object");
+          }
+          finalBody = processCompletionsResponse(bodyJSON, model, "chatcmpl-" + generateId());
+      } catch (err) {
+          console.error("Error parsing or processing response:", err);
+          return new Response(responseBodyText, { headers: fixCors({headers: finalHeaders}).headers, status: 500 }); 
+      }
   }
 
-  return new Response(responseBodyText, {
+  return new Response(finalBody, {
       headers: fixCors({headers: finalHeaders}).headers,
       status: response.status,
       statusText: response.statusText,
   });
 }
 
-// Helper function to safely parse JSON.
-function tryParseJSON(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text; // Return the original text if it's not valid JSON.
-  }
-}
-
-// ... The rest of the file remains the same ...
+// ... The rest of the file can remain exactly the same ...
+// It is provided here for completeness.
 
 class HttpError extends Error {
   constructor(message, status) {
