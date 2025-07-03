@@ -6,9 +6,8 @@
 [functions]
   node_bundler = "esbuild"
 
-# 重定向规则块
 [[redirects]]
   from = "/v1beta/*"
-  to = "/api/proxy"
+  to = "/.netlify/functions/handler"  # <--- 修改这一行
   status = 200
   force = true
